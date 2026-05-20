@@ -3,7 +3,6 @@ import torch
 
 import os
 
-os.environ["TRITON_INTERPRET"] = "1"
 
 import triton
 import triton.language as tl
@@ -23,32 +22,28 @@ def torch_silu(w, up):
 # print(torch_res)
 
 @triton.jit
-def triton_silu(N, M, w, up, y, stride, BLOCK_SIZE: tl.constexpr):
+def triton_silu(n_rows, n_cols, w, up, y, stride, BLOCK_SIZE: tl.constexpr):
     row = tl.program_id(0)
     w += row * stride
     y += row * stride
     up += row * stride
-    for offs in range(0, M, BLOCK_SIZE):
+    for offs in range(0, n_cols, BLOCK_SIZE):
         cols = offs + tl.arange(0, BLOCK_SIZE)
-        a = tl.load(w + cols, mask=cols < M, other=.0).to(tl.float32)
-        b = tl.load(up + cols, mask = cols < M, other=.0).to(tl.float32)
-        tl.store(y + cols, (a * tl.sigmoid(a)) * b, mask=cols < M)
+        mask = cols < n_cols
+        a = tl.load(w + cols, mask=mask, other=.0).to(tl.float32)
+        b = tl.load(up + cols, mask=mask, other=.0).to(tl.float32)
+        tl.store(y + cols, (a * tl.sigmoid(a)) * b, mask=mask)
 
-def tri_easy(N, M, w, up):
+def tri_easy(n_rows, n_cols, w, up):
     y = torch.empty_like(w)
     x_arg = w.reshape(-1, w.shape[-1])
     MAX_FUSED_SIZE = 65536 // w.element_size()
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(M))
-    if M > BLOCK_SIZE:
+    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(n_cols))
+    if n_cols > BLOCK_SIZE:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 # heuristics for number of warps
     num_warps = min(max(BLOCK_SIZE // 256, 1), 8)
-    print(f'BLOCK_SIZE {BLOCK_SIZE}')
-    print(f'num_warps {num_warps}')
-    print(f'stride {x_arg.stride(0)}')
-    print(f'x_arg.shape {x_arg.shape}')
-    print(f'M, N {M} {N}')
-    triton_silu[(N, )](N, M, w, up, y, x_arg.stride(0), BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_ctas=1)
+    triton_silu[(n_rows, )](n_rows, n_cols, w, up, y, x_arg.stride(0), BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_ctas=1)
     return y
 
 #for i in range(N):
@@ -60,18 +55,18 @@ def tri_easy(N, M, w, up):
 
 @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names = ['N'],
-            x_vals = [512 * i for i in range(2, 32)],
+            x_names = ['n_rows'],
+            x_vals = [512 * i for i in range(2, 40)],
             line_arg='provider',
             line_vals=['triton', 'torch'],
             line_names=['Triton', 'Torch'],
             styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
             ylabel='GB/s',
             plot_name='silu',
-            args={'M': 4096, 'dtype': torch.float32}
+            args={'n_cols': 4096, 'dtype': torch.float32}
         ))
-def bench_silu(M, N, dtype, provider, device=DEVICE):
-    w_shape = (M, N)
+def bench_silu(n_rows, n_cols, dtype, provider, device=DEVICE):
+    w_shape = (n_rows, n_cols)
     w = torch.rand(w_shape, dtype=dtype,device=device)
     up = torch.rand(w_shape, dtype=dtype, device=device)
     quantiles = [0.5, 0.2, 0.8]
@@ -79,7 +74,7 @@ def bench_silu(M, N, dtype, provider, device=DEVICE):
     def y_fwd():
         if provider == 'triton':
             print('tri')
-            return tri_easy(N, M, w, up)
+            return tri_easy(n_rows, n_cols, w, up)
         if provider == 'torch':
             print('tor')
             return torch_silu(w, up)
