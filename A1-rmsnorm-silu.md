@@ -91,7 +91,71 @@ Optimized ImplementationsFor the highest levels of performance and stability, it
 - For hardware like NVIDIA GPUs, consider fused engines (such as cuDNN Frontend's Fused RMSNorm + SiLU) for joint execution efficiency and numerical consistency
 
 ## 3. Fused SiLU × gate (SwiGLU) — math layer
-TBD W21.
+
+### 3.1 GLU family — контекст
+
+**GLU (Gated Linear Unit)** — Dauphin et al. 2017 «Language Modeling with Gated Convolutional Networks». Originally в convolutional language models, потом adopted для transformer FFN.
+
+Canonical GLU (Dauphin 2017, с biases + sigmoid gate):
+
+$$h_l(X) = (X W + b) \otimes \sigma(X V + c)$$
+
+где $\otimes$ — Hadamard (element-wise) product, $\sigma$ — sigmoid.
+
+**Семейство GLU вариантов** (Shazeer 2020 «GLU Variants Improve Transformer») — generic без bias:
+
+$$h(X) = \text{act}(X W_1) \otimes (X W_2), \quad \text{act} \in \{\sigma, \text{SiLU}, \text{GELU}, \text{ReLU}\}$$
+
+| act | Имя |
+|-----|-----|
+| σ | GLU |
+| SiLU (Swish) | **SwiGLU** |
+| GELU | GeGLU |
+| ReLU | ReGLU |
+
+Shazeer 2020 показал: SwiGLU и GeGLU дают ~1% improvement perplexity в language modeling vs vanilla ReLU/GELU FFN. Без strong theoretical justification — просто работает.
+
+**Контекст обучения (Dauphin 2017):** 8-GPU setup с data parallelism — model replicated, batch split 1/8 на GPU, gradients summed через NVIDIA NCCL. Это позволило обучать larger hidden units. Backdrop для понимания scale того времени — но сегодня это стандартная инфраструктура.
+
+### 3.2 SwiGLU definition (LLaMA canonical)
+
+Canonical SwiGLU (LLaMA, PaLM, Mistral — **без bias**):
+
+$$\text{SwiGLU}(X) = \text{SiLU}(X W_1) \otimes (X W_2)$$
+
+где:
+- $X \in \mathbb{R}^{d_{\text{model}}}$ — input vector.
+- $W_1, W_2 \in \mathbb{R}^{d_{\text{model}} \times d_{\text{hidden}}}$ — две learnable projection matrices.
+- $\otimes$ — Hadamard product.
+- SiLU(t) = t · σ(t) — см. §2.
+
+**Полный SwiGLU FFN блок** (как в LLaMA):
+
+$$\text{FFN}_{\text{SwiGLU}}(X) = (\text{SiLU}(X W_1) \otimes (X W_2)) W_3$$
+
+где $W_3 \in \mathbb{R}^{d_{\text{hidden}} \times d_{\text{model}}}$ — output projection обратно к $d_{\text{model}}$.
+
+**Размерности:**
+- В обычном transformer FFN: $d_{\text{hidden}} = 4 d_{\text{model}}$.
+- В LLaMA SwiGLU: $d_{\text{hidden}} = \frac{2}{3} \cdot 4 d_{\text{model}} \approx 2.67 d_{\text{model}}$ — **компенсация дополнительного параметра** через smaller hidden dim. Обоснование — см. §3.4.
+
+### 3.3 Vanilla FFN — отличие в операторе
+
+> Короткое примечание (bug fix из notes): vanilla Transformer FFN использует **matrix multiplication** второго слоя, не Hadamard product:
+>
+> $$\text{FFN}(x) = \text{ReLU}(x W_1 + b_1) W_2 + b_2$$
+>
+> Hadamard ($\otimes$) появляется **только** в gated structures (GLU family). В обычном FFN — обычный matmul.
+
+### 3.4 Parameter count — TBD W22
+
+### 3.5 Why gating works (intuition) — TBD W22
+
+### 3.6 Implementation — fused kernel — TBD W22
+
+> Cross-link с шагом 2 D3 path (Triton 250 GB/s, 1.67× vs Torch) + A2 reading (kernel fusion pattern).
+
+### 3.7 Hooks для §5 Narrative — TBD W22
 ## 4. Engineering — bench, hardware, kernel design
 TBD W21.
 ## 5. Narrative — what this says about hardware-algorithm gap
