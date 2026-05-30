@@ -45,15 +45,15 @@ def triton_matmul_grouped(A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.const
     a_block = i * K + tl.arange(0, K)[None, :] + tl.arange(0, BLOCK_SIZE)[:, None] * K
     a = tl.load(A + a_block, mask=a_block < M*K, other=.0)
     
-    b_block = j + tl.arange(0, BLOCK_SIZE)[None, :] + tl.arange(0, N)[:, None] * N
+    b_block = j + tl.arange(0, BLOCK_SIZE)[None, :] + tl.arange(0, K)[:, None] * N
     b = tl.load(B + b_block, mask=b_block < K*N, other=.0)
 
     c = tl.dot(a, b)
-    tl.store(C + (i * K) + (j + tl.arange(0, BLOCK_SIZE)[None, :]) + tl.arange(0, BLOCK_SIZE)[:, None] * K, c)
+    tl.store(C + (i * N) + (j + tl.arange(0, BLOCK_SIZE)[None, :]) + tl.arange(0, BLOCK_SIZE)[:, None] * N, c)
 
 
 def run():
-    M, N, K = 512, 512, 512
+    M, N, K = 512, 512, 1024
 
     a = torch.randn(M, K, dtype=torch.float16, device=DEVICE)
     b = torch.randn(K, N, dtype=torch.float16, device=DEVICE)
@@ -125,4 +125,4 @@ def benchmark(M, N, K, GROUP_SIZE, provider):
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
-benchmark.run(save_path='./mm', show_plots=True, print_data=True)
+# benchmark.run(save_path='./mm', print_data=True)
